@@ -1,0 +1,32 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+$script = <<-SCRIPT
+chmod +x linux.sh
+sudo ./linux.sh
+chmod 600 ~/.ssh/id_rsa
+cat id_rsa.pub >> ~/.ssh/authorized_keys
+sudo systemctl restart sshd
+SCRIPT
+
+Vagrant.configure("2") do |config|
+  config.vm.define "windows" do |win|
+    win.vm.box = "jborean93/WindowsServer2019"
+    win.vm.hostname = "windows-host1"
+    win.vm.network :private_network, ip: "192.168.56.50"
+
+    win.vm.provision "file", source: "id_rsa", destination: "id_rsa"
+    win.vm.provision "file", source: "id_rsa.pub", destination: "id_rsa.pub"
+    win.vm.provision "file", source: "windows.ps1", destination: "windows.ps1"
+  end
+
+  config.vm.define "linux" do |lin|
+    lin.vm.box = "generic/fedora29"
+    lin.vm.hostname = "linux-host"
+    lin.vm.network :private_network, ip: "192.168.56.51"
+    lin.vm.provision "file", source: "id_rsa", destination: "~/.ssh/id_rsa"
+    lin.vm.provision "file", source: "id_rsa.pub", destination: "id_rsa.pub"
+    lin.vm.provision "file", source: "linux.sh", destination: "linux.sh"
+    lin.vm.provision "shell", inline: $script, privileged: false
+  end
+end
