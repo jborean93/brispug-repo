@@ -47,8 +47,8 @@ variable. See [call_operator.ps1](call_operator.ps1) for some demos.
 
 ### Disadvantages
 
-* Return codes that are not 0 are treated as an error
-* Stderr is sent to the error stream by default
+* Runs within the same console as the powershell host, cannot spawn a new console
+* Stderr is sent to the consoles stderr pipe, cannot store as a variable
 * Cannot run asynchronously, need to wait until the process has finished
 
 
