@@ -1,4 +1,6 @@
-$ErrorActionPreference = 'Stop'
+# See the below for the rules around argument escaping
+# https://docs.microsoft.com/en-us/previous-versions//17w5ykft(v=vs.85)
+# https://blogs.msdn.microsoft.com/twistylittlepassagesallalike/2011/04/23/everyone-quotes-command-line-arguments-the-wrong-way/
 
 Add-Type -TypeDefinition @'
 using Microsoft.Win32.SafeHandles;
@@ -481,82 +483,133 @@ namespace CreateProcess
     }
 }
 '@
+Function Get-Argv {
+    Param (
+        [System.String]
+        $Argument
+    )
 
-# Create a process with a different parent
-$exe = (Get-Command -Name 'powershell.exe' -CommandType Application -ErrorAction Stop).Path
-$si = New-Object -TypeName CreateProcess.StartupInfo
-$parent_h = [CreateProcess.ProcessUtil]::OpenProcess('CreateProcess', $false, 4100)  # Set PID here
-$attrs = @{
-    ([CreateProcess.ProcessThreadAttribute]::ParentProcess) = $parent_h.DangerousGetHandle()
+    # https://ansible-ci-files.s3.amazonaws.com/test/integration/roles/test_win_module_utils/PrintArgv.exe
+    $file_path = "C:\temp\PrintArgv.exe"
+    $command_line = "$file_path $Argument"
+
+    $stdout_read, $stdout_write = $null
+    [CreateProcess.ProcessUtil]::CreatePipe([ref]$stdout_read, [ref]$stdout_write, $true, 0)
+    [CreateProcess.ProcessUtil]::SetHandleInformation($stdout_read, 'Inherit', 0)
+
+    $stderr_read, $stderr_write = $null
+    [CreateProcess.ProcessUtil]::CreatePipe([ref]$stderr_read, [ref]$stderr_write, $true, 0)
+    [CreateProcess.ProcessUtil]::SetHandleInformation($stderr_read, 'Inherit', 0)
+
+    $si = New-Object -TypeName CreateProcess.StartupInfo
+    $si.dwFlags = [CreateProcess.StartupInfoFlags]::UseStdHandles
+    $si.hStdOutput = $stdout_write
+    $si.hStdError = $stderr_write
+
+    $proc = [CreateProcess.ProcessUtil]::CreateProcess(
+        $exe,
+        $command_line,
+        [System.IntPtr]::Zero,
+        [System.IntPtr]::Zero,
+        $true,
+        0,
+        $null,
+        $null,
+        $si,
+        $null
+    )
+
+    $stdout_write.Close()
+    $stderr_write.Close()
+
+    $utf8_encoding = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
+
+    $stdout_fs = New-Object -TypeName System.IO.FileStream -ArgumentList $stdout_read, 'Read', 4096
+    $stdout_sr = New-Object -TypeName System.IO.StreamReader -ArgumentList $stdout_fs, $utf8_encoding, $true, 4096
+
+    $stderr_fs = New-Object -TypeName System.IO.FileStream -ArgumentList $stderr_read, 'Read', 4096
+    $stderr_sr = New-Object -TypeName System.IO.StreamReader -ArgumentList $stderr_fs, $utf8_encoding, $true, 4096
+
+    $stdout, $stderr = $null
+    [CreateProcess.ProcessUtil]::GetProcessOutput($stdout_sr, $stderr_sr, [ref]$stdout, [ref]$stderr)
+    [CreateProcess.ProcessUtil]::GetExitCodeProcess($proc.hProcess) > $null
+
+    return ,$stdout.TrimEnd("`r`n") -split "`r`n"
 }
-$proc = [CreateProcess.ProcessUtil]::CreateProcess(
-    $exe,
-    $null,
-    [System.IntPtr]::Zero,
-    [System.IntPtr]::Zero,
-    $false,
-    "NewConsole",
-    $null,
-    $null,
-    $si,
-    $attrs
-)
-([CreateProcess.SafeNativeHandle]$proc.hProcess).Dispose()
-([CreateProcess.SafeNativeHandle]$proc.hThread).Dispose()
-$parent_h.Dispose()
 
+Describe 'single argument with no spaces' {
+    It 'Passes proper string' {
+        $expected = @(
+            'arg1'
+        )
+        $actual = Get-Argv -Argument ''
+        $actual | Should -Be $expected
+    }
+}
 
-# Create a process with captured stdin/stdout/stderr
-$exe = (Get-Command -Name 'powershell.exe' -CommandType Application -ErrorAction Stop).Path
-$command_line = "$exe -Command `$host.UI.WriteLine('stdout'); `$host.UI.WriteErrorLine('stderr')"
+Describe 'multiple arguments with no spaces' {
+    It 'Passes proper string' {
+        $expected = @(
+            'arg1',
+            'arg2'
+        )
+        $actual = Get-Argv -Argument ''
+        $actual | Should -Be $expected
+    }
+}
 
-$stdout_read, $stdout_write = $null
-[CreateProcess.ProcessUtil]::CreatePipe([ref]$stdout_read, [ref]$stdout_write, $true, 0)
-[CreateProcess.ProcessUtil]::SetHandleInformation($stdout_read, 'Inherit', 0)
+Describe 'Tests argument with \' {
+    It 'Passes proper string' {
+        $expected = @(
+            'arg\1',
+            'arg\2'
+        )
+        $actual = Get-Argv -Argument ''
+        $actual | Should -Be $expected
+    }
+}
 
-$stderr_read, $stderr_write = $null
-[CreateProcess.ProcessUtil]::CreatePipe([ref]$stderr_read, [ref]$stderr_write, $true, 0)
-[CreateProcess.ProcessUtil]::SetHandleInformation($stderr_read, 'Inherit', 0)
+Describe 'Tests argument with special chars' {
+    It 'Passes proper string' {
+        $expected = @(
+            'carrot^',
+            'and&',
+            'single-quote''',
+            'exclamation!'
+        )
+        $actual = Get-Argv -Argument ''
+        $actual | Should -Be $expected
+    }
+}
 
-$si = New-Object -TypeName CreateProcess.StartupInfo
-$si.dwFlags = [CreateProcess.StartupInfoFlags]::UseStdHandles
-$si.hStdOutput = $stdout_write
-$si.hStdError = $stderr_write
+Describe 'Arguments with space' {
+    It 'Passes proper string' {
+        $expected = @(
+            'Argument with spaces',
+            'Another argument with space'
+        )
+        $actual = Get-Argv -Argument ''
+        $actual | Should -Be $expected
+    }
+}
 
-$proc = [CreateProcess.ProcessUtil]::CreateProcess(
-    $exe,
-    $command_line,
-    [System.IntPtr]::Zero,
-    [System.IntPtr]::Zero,
-    $true,
-    0,
-    $null,
-    $null,
-    $si,
-    $null
-)
+Describe 'Arguments with embeded "' {
+    It 'Passes proper string' {
+        $expected = @(
+            '"Quoted"',
+            '"Quoted with space"'
+        )
+        $actual = Get-Argv -Argument ''
+        $actual | Should -Be $expected
+    }
+}
 
-$stdout_write.Close()
-$stderr_write.Close()
-
-$utf8_encoding = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
-
-$stdout_fs = New-Object -TypeName System.IO.FileStream -ArgumentList $stdout_read, 'Read', 4096
-$stdout_sr = New-Object -TypeName System.IO.StreamReader -ArgumentList $stdout_fs, $utf8_encoding, $true, 4096
-
-$stderr_fs = New-Object -TypeName System.IO.FileStream -ArgumentList $stderr_read, 'Read', 4096
-$stderr_sr = New-Object -TypeName System.IO.StreamReader -ArgumentList $stderr_fs, $utf8_encoding, $true, 4096
-
-$stdout, $stderr = $null
-[CreateProcess.ProcessUtil]::GetProcessOutput($stdout_sr, $stderr_sr, [ref]$stdout, [ref]$stderr)
-$rc = [CreateProcess.ProcessUtil]::GetExitCodeProcess($proc.hProcess)
-
-$stdout_sr.Close()
-$stderr_sr.Close()
-([CreateProcess.SafeNativeHandle]$proc.hProcess).Dispose()
-([CreateProcess.SafeNativeHandle]$proc.hThread).Dispose()
-$parent_h.Dispose()
-
-"RC: $rc"
-"STDOUT: $stdout"
-"STDERR: $stderr"
+Describe 'Arguments with \" and spaces' {
+    It 'Passes proper string' {
+        $expected = @(
+            '{"key": "Value \"quoted\""}'
+        )
+        $actual = Get-Argv -Argument ''
+        $actual | Should -Be $expected
+    }
+}
