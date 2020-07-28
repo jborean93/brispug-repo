@@ -1,0 +1,24 @@
+- hosts: windows
+  collections:
+  - community.windows
+
+  pre_tasks:
+  - name: get the thumbprints for the servers certificates installed
+    win_certificate_info:
+      store_location: Localmachine
+      store_name: My
+    register: installed_certs
+
+  - name: select the correct certificate
+    set_fact:
+      certificate_thumbprint: >-
+        {{ (installed_certs.certificates |
+        selectattr("subject", "equalto", "CN=" ~ ansible_host) |
+        map(attribute="thumbprint") | list)[0] }}
+
+  roles:
+  - name: website
+    site_name: My IIS Site
+    site_http_port: 80
+    site_https_port: 443
+    site_thumbprint: '{{ certificate_thumbprint }}'

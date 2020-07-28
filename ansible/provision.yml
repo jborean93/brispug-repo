@@ -1,0 +1,182 @@
+- name: provision Azure host
+  hosts: localhost
+  vars_prompt:
+  - name: resource_group
+    private: no
+    prompt: What resource group should the VM be placed in?
+
+  - name: storage_account
+    private: no
+    prompt: What is the name of the Azure storage account?
+
+  - name: virtual_network
+    private: no
+    prompt: What is the name of the Azure private network?
+
+  - name: vm_name
+    private: no
+    prompt: What is the name of the VM to create?
+
+  - name: admin_username
+    private: no
+    prompt:  What is the admin username to set up on the Windows VM?
+
+  - name: admin_password
+    private: yes
+    prompt: What is the admin username password?
+
+  tasks:
+  - name: create resource group
+    azure_rm_resourcegroup:
+      name: '{{ resource_group }}'
+      location: '{{ azure_location | default("australiaeast") }}'
+      state: present
+
+  - name: create virtual network
+    azure_rm_virtualnetwork:
+      resource_group: '{{ resource_group }}'
+      name: '{{ virtual_network }}'
+      address_prefixes_cidr:
+      - 10.1.0.0/16
+      state: present
+
+  - name: create subnet in virtual network
+    azure_rm_subnet:
+      resource_group: '{{ resource_group }}'
+      virtual_network_name: '{{ virtual_network }}'
+      name: subnet-{{ virtual_network }}
+      address_prefix_cidr: 10.1.0.0/24
+      state: present
+
+  - name: create storage account
+    azure_rm_storageaccount:
+      resource_group: '{{ resource_group }}'
+      name: '{{ storage_account }}'
+      account_type: Standard_LRS
+
+  - name: create network security group
+    azure_rm_securitygroup:
+      resource_group: '{{ resource_group }}'
+      name: nsg-{{ vm_name }}
+      rules:
+      - name: AllowWinRMHTTPS
+        protocol: Tcp
+        destination_port_range: 5986
+        access: Allow
+        direction: Inbound
+        priority: 666
+      - name: AllowIIS
+        protocol: Tcp
+        destination_port_range: 443
+        access: Allow
+        direction: Inbound
+        priority: 667
+      - name: AllowRDP
+        protocol: Tcp
+        destination_port_range: 3389
+        access: Allow
+        direction: Inbound
+        priority: 668
+      state: present
+
+  - name: create public facing network adapter
+    azure_rm_publicipaddress:
+      resource_group: '{{ resource_group }}'
+      name: public-ip-{{ vm_name }}
+      domain_name: '{{ vm_name }}'
+      state: present
+    register: azure_public_ip
+
+  - name: create VM NIC
+    azure_rm_networkinterface:
+      resource_group: '{{ resource_group }}'
+      virtual_network: '{{ virtual_network }}'
+      subnet: subnet-{{ virtual_network }}
+      security_group: nsg-{{ vm_name }}
+      public_ip_name: public-ip-{{ vm_name }}
+      name: nic-{{ vm_name }}
+      state: present
+
+  - name: create VM
+    azure_rm_virtualmachine:
+      resource_group: '{{ resource_group }}'
+      virtual_network_name: '{{ virtual_network }}'
+      storage_account_name: '{{ storage_account }}'
+      name: '{{ vm_name }}'
+      admin_username: '{{ admin_username }}'
+      admin_password: '{{ admin_password }}'
+      image:
+        offer: WindowsServer
+        publisher: MicrosoftWindowsServer
+        sku: 2019-Datacenter
+        version: latest
+      os_type: Windows
+      vm_size: Standard_D1
+      network_interfaces: nic-{{ vm_name }}
+      state: present
+
+  - name: set fact of VM extension script
+    set_fact:
+      vm_extension: '{{ lookup("template", "winrm-setup.ps1.j2") | string | b64encode("utf-16-le") }}'
+    vars:
+      vm_fqdn: '{{ azure_public_ip.state.dns_settings.fqdn }}'
+    no_log: yes
+
+  - name: create VM extension to configure WinRM for HTTPS
+    azure_rm_virtualmachineextension:
+      resource_group: '{{ resource_group }}'
+      virtual_machine_name: '{{ vm_name }}'
+      name: winrm-extension
+      publisher: Microsoft.Compute
+      virtual_machine_extension_type: CustomScriptExtension
+      type_handler_version: 1.9
+      settings:
+        commandToExecute: powershell.exe -ExecutionPolicy ByPass -EncodedCommand {{ vm_extension }}
+      auto_upgrade_minor_version: true
+
+  - name: wait for WinRM port to come online
+    wait_for:
+      port: 5986
+      host: '{{ azure_public_ip.state.dns_settings.fqdn }}'
+      timeout: 600
+
+  - name: retrieve WinRM cert
+    block:
+    - name: make sure the connection is ready to go
+      wait_for_connection:
+        timeout: 600
+
+    - name: fetch the CA certificate
+      fetch:
+        src: C:\Windows\TEMP\rootCA.crt
+        dest: '{{ playbook_dir }}/{{ vm_name }}-CA.crt'
+        flat: yes
+    vars:
+      ansible_host: '{{ azure_public_ip.state.dns_settings.fqdn }}'
+      ansible_user: '{{ admin_username }}'
+      ansible_password: '{{ admin_password }}'
+      ansible_connection: psrp
+      ansible_psrp_cert_validation: ignore
+
+  - name: convert the CA certificate to a PEM
+    command: openssl x509 -inform DER -in {{ vm_name }}-CA.crt -out {{ vm_name }}-CA.pem
+    args:
+      chdir: '{{ playbook_dir }}'
+      creates: '{{ vm_name }}-CA.pem'
+    delegate_to: localhost
+
+  - name: remove the temp CA crt file
+    file:
+      path: '{{ playbook_dir }}/{{ vm_name }}-CA.crt'
+      state: absent
+
+  - name: add the host to the inventory file
+    lineinfile:
+      line: >-
+        {{ vm_name }}  ansible_host={{ azure_public_ip.state.dns_settings.fqdn }}
+        ansible_user={{ admin_username }}
+        ansible_password={{ admin_password }}
+        ansible_psrp_ca_cert={{ vm_name }}-CA.pem
+      insertafter: '\[windows\]'
+      path: '{{ playbook_dir }}/inventory.ini'
+      state: present

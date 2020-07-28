@@ -1,0 +1,57 @@
+$ErrorActionPreference = 'Stop'
+
+# Create CA and then a cert signed by that CA for the WinRM listener
+$fqdn = '{{ vm_fqdn }}'
+
+$params = @{
+  DnsName = "$fqdn Root Cert"
+  KeyLength = 2048
+  KeyAlgorithm = 'RSA'
+  HashAlgorithm = 'SHA256'
+  KeyExportPolicy = 'Exportable'
+  NotAfter = (Get-Date).AddYears(1)
+  CertStoreLocation = 'Cert:\LocalMachine\My'
+  KeyUsage = 'CertSign','CRLSign'
+}
+$rootCA = New-SelfSignedCertificate @params
+
+$params = @{
+  DnsName = $fqdn
+  Signer = $rootCA
+  KeyLength = 2048
+  KeyAlgorithm = 'RSA'
+  HashAlgorithm = 'SHA256'
+  KeyExportPolicy = 'Exportable'
+  NotAfter = (Get-date).AddMonths(3)
+  CertStoreLocation = 'Cert:\LocalMachine\My'
+}
+$winrmCert = New-SelfSignedCertificate @params
+
+# Trust our own certificate and allow Ansible to get the CA for later trust
+$caPath = 'C:\Windows\TEMP\rootCA.crt'
+Export-Certificate -Cert $rootCA -FilePath $caPath -Type CERT
+Import-Certificate -CertStoreLocation 'Cert:\LocalMachine\Root' -FilePath $caPath
+
+# Set up the HTTPS WinRM endpoint with our new cert
+$wsmanParams = @{
+    ResourceURI = 'winrm/config/Listener'
+    SelectorSet = @{
+        Address = '*'
+        Transport = 'HTTPS'
+    }
+    ValueSet = @{
+        CertificateThumbprint = $winrmCert.Thumbprint
+    }
+}
+$null = New-WSManInstance @wsmanParams
+
+# Allow incoming traffic on port 5986 for the Windows firewall
+$firewallParams = @{
+    DisplayName = 'Windows Remote Management (HTTPS-In)'
+    Description = 'Inbound rule for Windows Remote Management via WS-Management. [TCP 5986]'
+    Direction = 'Inbound'
+    LocalPort = 5986
+    Protocol = 'TCP'
+    Action = 'Allow'
+}
+New-NetFirewallRule @firewallParams

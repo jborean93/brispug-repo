@@ -1,0 +1,50 @@
+- name: install IIS features
+  win_feature:
+    name: Web-Server
+    state: present
+  register: iis_feature
+
+- name: reboot after installing IIS features
+  win_reboot:
+  when: iis_feature.reboot_required
+
+- name: create site file directory
+  win_file:
+    path: C:\inetpub\wwwroot\{{ site_name }}
+    state: directory
+
+- name: create index page for default file
+  win_template:
+    src: index.html.j2
+    dest: C:\inetpub\wwwroot\{{ site_name }}\index.html
+
+- name: create new website
+  win_iis_website:
+    name: '{{ site_name }}'
+    state: started
+    physical_path: C:\inetpub\wwwroot\{{ site_name }}
+    hostname: '{{ ansible_host }}'
+    port: '{{ site_http_port }}'
+
+- name: create https binding
+  win_iis_webbinding:
+    name: '{{ site_name }}'
+    port: '{{ site_https_port }}'
+    protocol: https
+    certificate_hash: '{{ site_thumbprint }}'
+    host_header: '{{ ansible_host }}'
+    state: present
+  when: site_https_port is defined or site_thumbprint is defined
+
+- name: ensure firewall allows incoming traffic
+  win_firewall_rule:
+    name: '{{ site_name }} incoming ({{ item }})'
+    enable: yes
+    state: present
+    localport: '{{ item }}'
+    action: Allow
+    direction: In
+    protocol: Tcp
+  with_items:
+  - '{{ site_http_port }}'
+  - '{{ site_https_port }}'

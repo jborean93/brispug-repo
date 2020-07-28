@@ -1,0 +1,17 @@
+<html>
+<head>
+<title>IIS Site for {{ ansible_host }}</title>
+</head>
+<body>
+Test website for {{ ansible_host }}
+<p>
+OS Distribution: {{ ansible_distribution }}
+<p>
+OS Version: {{ ansible_distribution_version }}
+<p>
+Environment Variables
+{% for env_name, env_value in ansible_env.items() %}
+{{ env_name }}={{ env_value }}
+{% endfor %}
+</body>
+</html>
