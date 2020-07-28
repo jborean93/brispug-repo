@@ -71,12 +71,6 @@
         access: Allow
         direction: Inbound
         priority: 667
-      - name: AllowRDP
-        protocol: Tcp
-        destination_port_range: 3389
-        access: Allow
-        direction: Inbound
-        priority: 668
       state: present
 
   - name: create public facing network adapter

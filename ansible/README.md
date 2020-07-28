@@ -47,3 +47,5 @@ When running `ansible-playbook provision.yml -v` it will prompt you for the foll
 The script will append the host details to the `inventory.ini` file under the `windows` group
 
 From there to setup the IIS host run `ansible-playbook main.yml -v`.
+
+You can test the site by running `curl https://<dns name> --cacert <vm name>-CA.pem`.

@@ -1,5 +1,6 @@
 - hosts: windows
   collections:
+  - ansible.windows
   - community.windows
 
   pre_tasks:

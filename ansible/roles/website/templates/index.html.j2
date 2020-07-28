@@ -10,8 +10,9 @@ OS Distribution: {{ ansible_distribution }}
 OS Version: {{ ansible_distribution_version }}
 <p>
 Environment Variables
+<p>
 {% for env_name, env_value in ansible_env.items() %}
-{{ env_name }}={{ env_value }}
+{{ env_name }}={{ env_value }}<br>
 {% endfor %}
 </body>
 </html>
