@@ -2,3 +2,4 @@ ansible/*.pem
 powershell-remoting/.vagrant
 powershell-remoting/id_rsa
 powershell-remoting/id_rsa.pub
+ansible-windows/.vagrant

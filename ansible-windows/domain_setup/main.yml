@@ -1,0 +1,253 @@
+- name: setup CA certificates
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+  - name: create cert output folder
+    ansible.builtin.file:
+      path: '{{ playbook_dir }}/cert_setup'
+      state: directory
+
+  - name: generate CA and LDAPS certificates
+    ansible.builtin.script:
+      cmd: generate_cert.sh {{ domain_name }} password
+      creates: '{{ playbook_dir }}/cert_setup/complete.txt'
+      chdir: '{{ playbook_dir }}/cert_setup'
+
+- name: setup domain pre-requisites
+  hosts: windows
+  gather_facts: false
+  tasks:
+  - name: get network connection info
+    ansible.windows.win_powershell:
+      script: |
+        $ErrorActionPreference = 'Stop'
+        $Ansible.Changed = $false
+
+        $adapterName = Get-NetAdapter | Select-Object -ExpandProperty Name -First 1
+        $ipInfo = Get-NetIPAddress -InterfaceAlias $adapterName -AddressFamily IPv4
+        [PSCustomObject]@{
+            Name = $adapterName
+            IP = $ipInfo.IPAddress
+        }
+    register: raw_connection_info
+
+  - set_fact:
+      public_connection_name: '{{ raw_connection_info.output[0].Name }}'
+      public_connection_ip: '{{ raw_connection_info.output[0].IP }}'
+
+  - name: copy CA certificate
+    ansible.windows.win_copy:
+      src: '{{ playbook_dir }}/cert_setup/ca.pem'
+      dest: C:\Windows\TEMP\ca.pem
+
+  - name: import CA certificate to trusted root CA
+    ansible.windows.win_certificate_store:
+      path: C:\Windows\TEMP\ca.pem
+      state: present
+      store_location: LocalMachine
+      store_name: Root
+
+- name: create domain controller
+  hosts: DC01
+  gather_facts: false
+
+  tasks:
+  - name: set the DNS for the internal adapters to localhost
+    ansible.windows.win_dns_client:
+      adapter_names:
+      - '{{ public_connection_name }}'
+      dns_servers:
+      - 127.0.0.1
+
+  - name: ensure domain exists and DC is promoted as a domain controller
+    microsoft.ad.domain:
+      dns_domain_name: '{{ domain_name }}'
+      safe_mode_password: '{{ domain_password }}'
+      reboot: true
+    register: domain_install
+
+  - name: create OUs
+    microsoft.ad.ou:
+      name: '{{ item }}'
+      path: '{{ domain_ou }}'
+      state: present
+    loop:
+    - '{{ hostvars["APP01"]["domain_ou_name"] }}'
+    - '{{ hostvars["SQL01"]["domain_ou_name"] }}'
+
+  - name: update LAPS AD settings
+    when: domain_install is changed
+    become: true
+    become_method: runas
+    become_user: SYSTEM
+    block:
+    - name: update LAPS AD schema
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+
+          Update-LapsADSchema -Confirm:$false
+
+    - name: grant OU permission for LAPS password update
+      ansible.windows.win_powershell:
+        parameters:
+          Identity:
+          - '{{ hostvars["APP01"]["domain_ou_name"] }}'
+          - '{{ hostvars["SQL01"]["domain_ou_name"] }}'
+        script: |
+          param($Identity)
+
+          $ErrorActionPreference = 'Stop'
+
+          Set-LapsADComputerSelfPermission -Identity $Identity
+
+  - name: create LAPS GPO
+    ansible.windows.win_powershell:
+      parameters:
+        Identity:
+        - '{{ hostvars["APP01"]["domain_ou_name"] }}'
+        - '{{ hostvars["SQL01"]["domain_ou_name"] }}'
+      script: '{{ lookup("file", "setup_laps_gpo.ps1") }}'   
+    become: true
+    become_method: runas
+    become_user: SYSTEM
+
+  - name: copy LDAPS certificate
+    ansible.windows.win_copy:
+      src: '{{ playbook_dir }}/cert_setup/DC01.pfx'
+      dest: C:\Windows\TEMP\DC01.pfx
+
+  - name: import LDAPS certificate
+    ansible.windows.win_certificate_store:
+      path: C:\Windows\TEMP\DC01.pfx
+      password: password
+      key_exportable: no
+      key_storage: machine
+      state: present
+      store_type: service
+      store_location: NTDS
+      store_name: My
+    register: ldaps_cert_info
+
+  - name: register LDAPS certificate
+    ansible.windows.win_powershell:
+      script: |
+        $dse = [adsi]'LDAP://localhost/rootDSE'
+        [void]$dse.Properties['renewServerCertificate'].Add(1)
+        $dse.CommitChanges()
+    when: ldaps_cert_info is changed
+    become: true
+    become_method: runas
+    become_user: SYSTEM
+
+  - name: create domain username
+    microsoft.ad.user:
+      name: '{{ domain_username }}'
+      upn: '{{ domain_user_upn }}'
+      description: '{{ domain_username }} Domain Account'
+      password: '{{ domain_password }}'
+      password_never_expires: true
+      update_password: when_changed
+      groups:
+        set:
+        - Domain Admins
+        - Domain Users
+        - Enterprise Admins
+      state: present
+
+- name: join Windows hosts to domain
+  hosts: domain_members
+  gather_facts: false
+
+  tasks:
+  - name: set the DNS for the private adapter to point to the DC
+    ansible.windows.win_dns_client:
+      adapter_names:
+      - '{{ public_connection_name }}'
+      dns_servers:
+      - '{{ hostvars["DC01"]["public_connection_ip"] }}'
+
+  - name: enable local Administrator account for LAPS
+    ansible.windows.win_user:
+      name: Administrator
+      state: present
+      account_disabled: false
+
+  - name: join host to domain
+    microsoft.ad.membership:
+      dns_domain_name: '{{ domain_name }}'
+      domain_admin_user: '{{ domain_user_upn }}'
+      domain_admin_password: '{{ domain_password }}'
+      domain_ou_path: 'OU={{ domain_ou_name }},{{ domain_ou }}'
+      state: domain
+      reboot: true
+
+  - name: test out domain user logon
+    ansible.windows.win_whoami:
+    register: become_res
+    failed_when: become_res.upn != domain_user_upn
+    become: true
+    become_method: runas
+    vars:
+      ansible_become_user: '{{ domain_user_upn }}'
+      ansible_become_pass: '{{ domain_password }}'
+
+- name: install SQL certificate
+  hosts: SQL01
+  gather_facts: false
+
+  tasks:
+  - name: copy SQL certificate
+    ansible.windows.win_copy:
+      src: '{{ playbook_dir }}/cert_setup/SQL01.pfx'
+      dest: C:\Windows\TEMP\SQL01.pfx
+
+  - name: import SQL certificate
+    ansible.windows.win_certificate_store:
+      path: C:\Windows\TEMP\SQL01.pfx
+      password: password
+      key_exportable: no
+      key_storage: machine
+      state: present
+      store_location: LocalMachine
+      store_name: My
+    register: ldaps_cert_info
+
+- name: configure linux server
+  hosts: localhost
+  gather_facts: false
+  become: true
+  handlers:
+  - name: restart NetworkManager
+    service:
+      name: NetworkManager
+      state: restarted
+
+  tasks:
+  - name: ensure dnsmasq is installed
+    package:
+      name: dnsmasq
+      state: present
+
+  - name: configure NetworkManager to use dnsmasq
+    copy:
+      content: |
+        [main]
+        dns=dnsmasq
+      dest: /etc/NetworkManager/conf.d/00-use-dnsmasq.conf
+    notify: restart NetworkManager
+
+  - name: configure NetworkManager to reoslve domain addresses
+    copy:
+      content: |
+        server=/{{ domain_name }}/{{ hostvars["DC01"]["public_connection_ip"] }}
+      dest: /etc/NetworkManager/dnsmasq.d/00-{{ domain_name }}.conf
+    notify: restart NetworkManager
+  
+  - name: configure Kerberos
+    copy:
+      content: |
+        [libdefaults]
+          default_realm = {{ domain_name | upper }}
+      dest: /etc/krb5.conf.d/brispug_realm

@@ -1,0 +1,120 @@
+- name: setup SQK server
+  hosts: sql_servers
+  gather_facts: no
+
+  tasks:
+  - name: create AD group for SQL sysadmins
+    microsoft.ad.group:
+      name: SQLAdmins
+      scope: global
+      state: present
+      members:
+        add:
+        - vagrant-domain
+    register: group_info
+    delegate_to: DC01
+
+  - name: get Netlogon name for domain group
+    microsoft.ad.object_info:
+      identity: '{{ group_info.object_guid }}'
+      properties:
+      - msDS-PrincipalName
+    register: group_name
+    delegate_to: DC01
+
+  - name: template SQL install config file
+    ansible.windows.win_template:
+      src: sql_install.ini
+      dest: C:\Windows\TEMP\sql_install.ini
+
+  - name: install MS SQL Server
+    ansible.windows.win_package:
+      path: https://download.microsoft.com/download/5/1/4/5145fe04-4d30-4b85-b0d1-39533663a2f1/SQL2022-SSEI-Expr.exe
+      product_id: '{6621C765-569C-4D46-A8E9-C69A47971357}'
+      state: present
+      arguments: >-
+        /Q
+        /IACCEPTSQLSERVERLICENSETERMS
+        /ConfigurationFile=C:\Windows\TEMP\sql_install.ini
+    register: sql_install
+    become: true
+    become_method: runas
+    vars:
+      ansible_become_user: '{{ laps_user }}'
+      ansible_become_pass: '{{ laps_password }}'
+
+  - name: reboot after installing SQL
+    ansible.windows.win_reboot:
+    when: sql_install.reboot_required
+
+  - name: get certificate thumbprint
+    ansible.windows.win_powershell:
+      script: |
+        $Ansible.Changed = $false
+
+         $cert = Get-ChildItem -Path Cert:\LocalMachine\My |
+             Where-Object { $_.Subject.StartsWith('CN=SQL01') } |
+             Select-Object -First 1
+
+         $cert.Thumbprint
+
+         # Grants the SQL account permission to access the key
+         $key = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert)
+         $keyPath = Join-Path "$($env:ProgramData)\Microsoft\Crypto\RSA\MachineKeys" $key.Key.UniqueName
+
+         $win32Service = Get-CimInstance -ClassName Win32_Service -Filter 'Name="MSSQL$SQLEXPRESS"'
+         $serviceAccount = [System.Security.Principal.NTAccount]$win32Service.StartName
+         $readRights = [System.Security.AccessControl.FileSystemRights]::Read
+         $ace = [System.Security.AccessControl.FileSystemAccessRule]::new(
+             $serviceAccount,
+             $readRights,
+             'Allow')
+
+         $acl = Get-Acl -LiteralPath $keyPath
+         $existingRules = $acl.GetAccessRules($true, $false, [System.Security.Principal.NTAccount])
+
+         $changed = $true
+         foreach ($rule in $existingRules) {
+             if ($rule.IdentityReference -eq $serviceAccount -and $rule.FileSystemRights -band $readRights) {
+                 $changed = $false
+                 break
+             }
+         }
+
+         if ($changed) {
+             $acl.AddAccessRule($ace)
+             Set-Acl -LiteralPath $keyPath -AclObject $acl
+             $Ansible.Changed = $true
+         }
+    register: certificate_info     
+
+  - name: configure MS SQL encryption settings
+    ansible.windows.win_regedit:
+      path: HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL16.SQLEXPRESS\MSSQLServer\SuperSocketNetLib
+      name: '{{ item.name }}'
+      data: '{{ item.data }}'
+      type: '{{ item.type }}'
+    loop:
+    - name: Certificate
+      data: '{{ certificate_info.output[0] | lower }}'
+      type: string
+    - name: ForceEncryption
+      data: 1
+      type: dword
+    register: sql_config
+
+  - name: restart MS SQL service
+    ansible.windows.win_service:
+      name: MSSQL$SQLEXPRESS
+      state: restarted
+    when: sql_config is changed
+
+  - name: open firewall port
+    ansible.windows.win_powershell:
+      script: |
+        $ErrorActionPreference = 'Stop'
+
+        $null = Enable-NetFirewallRule -DisplayName 'File and Printer Sharing (SMB-In)'
+        $null = New-NetFirewallRule -DisplayName "SQLServer default instance" -Direction Inbound -LocalPort 1433 -Protocol TCP -Action Allow
+        $null = New-NetFirewallRule -DisplayName "SQLServer Browser service" -Direction Inbound -LocalPort 1434 -Protocol UDP -Action Allow
+    when: sql_install is changed

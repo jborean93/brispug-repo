@@ -1,0 +1,5 @@
+ansible-core < 2.16.0
+dpapi-ng  # microsoft.ad LDAP LAPS decryption support
+dnspython  # microsoft.ad LDAP DNS lookup support
+pypsrp[kerberos]  # Windows/WinRM support
+sansldap  # microsoft.ad LDAP support

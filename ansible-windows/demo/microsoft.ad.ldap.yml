@@ -1,0 +1,22 @@
+# Tells Ansible this should use the microsoft.ad.ldap inventory plugin
+# https://docs.ansible.com/ansible/latest/collections/microsoft/ad/ldap_inventory.html
+plugin: microsoft.ad.ldap
+
+# Requests the LDAP attributes and transforms each attribute into a variable
+# for the host.
+attributes:
+  objectSid:
+    object_sid: this | microsoft.ad.as_sid
+  distinguishedName:
+    parent_ou: this | regex_search('^CN=.+?((?<!\\),)OU=(?P<name>.+?)((?<!\\),)', '\g<name>') | flatten
+  msLAPS-EncryptedPassword:
+    laps_user: (this.value | from_json).n
+    laps_password: (this.value | from_json).p
+
+# Can be used to compose the groups from the AD output. Currently it will place
+# all the found LDAP hosts into the Windows group and assign the app and web
+# servers into their own groups.
+groups:
+  windows: true
+  app_servers: '"AppServers" in parent_ou'
+  sql_servers: '"SQLServers" in parent_ou'

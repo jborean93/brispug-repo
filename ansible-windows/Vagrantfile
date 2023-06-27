@@ -1,0 +1,85 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+$linuxScript = <<-EOF
+sudo dnf install -y python3.11 python3.11-devel gcc krb5-devel krb5-workstation
+python3.11 -m venv ~/ansible-venv
+
+sudo sed -re 's/^(PasswordAuthentication)([[:space:]]+)no/\\1\\2yes/' -i /etc/ssh/sshd_config
+sudo systemctl restart sshd
+
+echo "source ~/ansible-venv/bin/activate" >> ~/.bashrc
+source ~/ansible-venv/bin/activate
+cd ~/domain_setup
+pip install -r requirements-python.txt
+ansible-galaxy collection install -r requirements-ansible.yml
+EOF
+
+Vagrant.configure("2") do |config|
+  config.vm.define "LINUX01" do |linux|
+    linux.vm.box = "generic/alma9"
+    linux.vm.hostname = "LINUX01"
+    linux.vm.network "public_network", bridge: "Default Switch"
+
+    linux.vm.provision :file,
+      :source => "./domain_setup",
+      :destination => "~/domain_setup"
+    linux.vm.provision :file,
+      :source => "./demo",
+      :destination => "~/demo"
+    linux.vm.provision :shell,
+      :inline => $linuxScript,
+      :privileged => false
+  end
+
+  config.vm.define "APP01" do |app|
+    app.vm.box = "jborean93/WindowsServer2022"
+    app.vm.hostname = "APP01"
+    app.vm.network "public_network", bridge: "Default Switch"
+    app.vm.boot_timeout = 600
+    
+    app.vm.provider :hyperv do |h|
+      h.cpus = 4
+      h.memory = 4096
+    end
+
+    app.winrm.port = 5986
+    app.winrm.transport = :ssl
+    app.winrm.basic_auth_only = true
+    app.winrm.ssl_peer_verification = false
+  end
+
+  config.vm.define "DC01" do |dc|
+    dc.vm.box = "jborean93/WindowsServer2022"
+    dc.vm.hostname = "DC01"
+    dc.vm.network "public_network", bridge: "Default Switch"
+    dc.vm.boot_timeout = 600
+
+    dc.vm.provider :hyperv do |h|
+        h.cpus = 4
+        h.memory = 4096
+    end
+
+    dc.winrm.port = 5986
+    dc.winrm.transport = :ssl
+    dc.winrm.basic_auth_only = true
+    dc.winrm.ssl_peer_verification = false
+  end
+
+  config.vm.define "SQL01" do |sql|
+    sql.vm.box = "jborean93/WindowsServer2022"
+    sql.vm.hostname = "SQL01"
+    sql.vm.network "public_network", bridge: "Default Switch"
+    sql.vm.boot_timeout = 600
+    
+    sql.vm.provider :hyperv do |h|
+      h.cpus = 4
+      h.memory = 4096
+    end
+
+    sql.winrm.port = 5986
+    sql.winrm.transport = :ssl
+    sql.winrm.basic_auth_only = true
+    sql.winrm.ssl_peer_verification = false
+  end
+end

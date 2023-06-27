@@ -1,0 +1,10 @@
+- hosts: windows
+  gather_facts: false
+
+  tasks:
+  - name: test connection
+    ansible.windows.win_ping:
+
+  - name: display host SID
+    debug:
+      var: object_sid
